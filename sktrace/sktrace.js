@@ -94,7 +94,7 @@ on_arm64_after(GumCpuContext *cpu_context,
         const message = messagePtr.readUtf8String();
         console.log(message)
         // send(message)
-      }, 'void', ['pointer']),
+    }, 'void', ['pointer']),
 });
 
 
@@ -105,7 +105,7 @@ function stalkerTraceRangeC(tid, base, size) {
     userData.writePointer(base)
     const pointerSize = Process.pointerSize;
     userData.add(pointerSize).writePointer(base.add(size))
-    
+
     Stalker.follow(tid, {
         transform: arm64CM.transform,
         // onEvent: cm.process,
@@ -119,7 +119,7 @@ function stalkerTraceRange(tid, base, size) {
         transform: (iterator) => {
             const instruction = iterator.next();
             const startAddress = instruction.address;
-            const isModuleCode = startAddress.compare(base) >= 0 && 
+            const isModuleCode = startAddress.compare(base) >= 0 &&
                 startAddress.compare(base.add(size)) < 0;
             // const isModuleCode = true;
             do {
@@ -132,11 +132,11 @@ function stalkerTraceRange(tid, base, size) {
                         val: JSON.stringify(instruction)
                     })
                     iterator.putCallout((context) => {
-                            send({
-                                type: 'ctx',
-                                tid: tid,
-                                val: JSON.stringify(context)
-                            })
+                        send({
+                            type: 'ctx',
+                            tid: tid,
+                            val: JSON.stringify(context)
+                        })
                     })
                 }
             } while (iterator.next() !== null);
@@ -146,7 +146,7 @@ function stalkerTraceRange(tid, base, size) {
 
 
 function traceAddr(addr) {
-    let moduleMap = new ModuleMap();    
+    let moduleMap = new ModuleMap();
     let targetModule = moduleMap.find(addr);
     console.log(JSON.stringify(targetModule))
     let exports = targetModule.enumerateExports();
@@ -157,16 +157,16 @@ function traceAddr(addr) {
     // })
     // send({
     //     type: "sym",
-    
+
 
     // })
     Interceptor.attach(addr, {
-        onEnter: function(args) {
+        onEnter: function (args) {
             this.tid = Process.getCurrentThreadId()
             // stalkerTraceRangeC(this.tid, targetModule.base, targetModule.size)
             stalkerTraceRange(this.tid, targetModule.base, targetModule.size)
         },
-        onLeave: function(ret) {
+        onLeave: function (ret) {
             Stalker.unfollow(this.tid);
             Stalker.garbageCollect()
             send({
@@ -182,6 +182,65 @@ function traceSymbol(symbol) {
 
 }
 
+function hook_dlopen(libname,payload) {
+    console.log("Process.arch : " + Process.arch);
+    if (Process.arch == 'arm') {
+        var dlopen = Module.findExportByName(null, 'dlopen');
+        if (dlopen) {
+            Interceptor.attach(android_dlopen_ext, {
+                onEnter: function (args) {
+                    this.call_hook = false;
+                    var so_name = ptr(args[0]).readCString();
+                    if (so_name.indexOf("libsigner.so") >= 0) {
+                        console.log("dlopen:", ptr(args[0]).readCString());
+                        this.call_hook = true;
+                    }
+
+                }, onLeave: function (retval) {
+                    if (this.call_hook) {
+                        const targetModule = Process.getModuleByName(libname);
+                        let targetAddress = null;
+                        if ("symbol" in payload) {
+                            targetAddress = targetModule.findExportByName(payload.symbol);
+                        } else if ("offset" in payload) {
+                            targetAddress = targetModule.base.add(ptr(payload.offset));
+                        }
+                        traceAddr(targetAddress)
+                    }
+                }
+            });
+        }
+    }
+    //64位
+    if (Process.arch == 'arm64') {
+        var android_dlopen_ext = Module.findExportByName(null, 'android_dlopen_ext');
+        if (android_dlopen_ext) {
+            Interceptor.attach(android_dlopen_ext, {
+                onEnter: function (args) {
+                    this.call_hook = false;
+                    var so_name = ptr(args[0]).readCString();
+                    if (so_name.indexOf("libsigner.so") >= 0) {
+                        console.log("android_dlopen_ext:", ptr(args[0]).readCString());
+                        this.call_hook = true;
+                    }
+
+                }, onLeave: function (retval) {
+                    if (this.call_hook) {
+                        const targetModule = Process.getModuleByName(libname);
+                        let targetAddress = null;
+                        if ("symbol" in payload) {
+                            targetAddress = targetModule.findExportByName(payload.symbol);
+                        } else if ("offset" in payload) {
+                            targetAddress = targetModule.base.add(ptr(payload.offset));
+                        }
+                        traceAddr(targetAddress)
+                    }
+                }
+            });
+        }
+    }
+}
+
 /**
  * from jnitrace-egine
  */
@@ -195,7 +254,7 @@ function watcherLib(libname, callback) {
         Interceptor.replace(dlopen, new NativeCallback((filename, mode) => {
             const path = filename.readCString();
             const retval = dlopen(filename, mode);
-    
+
             if (path !== null) {
                 if (checkLibrary(path)) {
                     // eslint-disable-next-line @typescript-eslint/no-base-to-string
@@ -222,15 +281,16 @@ function watcherLib(libname, callback) {
         console.log(JSON.stringify(payload))
         const libname = payload.libname;
         console.log(`libname:${libname}`)
-        if(payload.spawn) {
-            console.error(`todo: spawn inject not implemented`)
+        if (payload.spawn) {
+            console.log("test spawn...")
+            hook_dlopen(libname,payload);
         } else {
             // const modules = Process.enumerateModules();
             const targetModule = Process.getModuleByName(libname);
             let targetAddress = null;
-            if("symbol" in payload) {
+            if ("symbol" in payload) {
                 targetAddress = targetModule.findExportByName(payload.symbol);
-            } else if("offset" in payload) {
+            } else if ("offset" in payload) {
                 targetAddress = targetModule.base.add(ptr(payload.offset));
             }
             traceAddr(targetAddress)
